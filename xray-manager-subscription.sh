@@ -43,46 +43,17 @@ if [[ "$EUID" -ne 0 ]]; then
     die "Нужны права root. Запустите: curl -sL https://raw.githubusercontent.com/work140200-beep/xray-subscription/main/xray-manager-subscription.sh -o /tmp/xray-manager-subscription.sh && sudo bash /tmp/xray-manager-subscription.sh"
 fi
 
-validate_port() {
-    local name="$1" val="$2"
-    [[ "$val" =~ ^[0-9]+$ && "$val" -ge 1 && "$val" -le 65535 ]] || die "Некорректный порт для $name: '$val' (допустимо 1-65535)."
-}
-
-echo ""
-echo "===== Порты протоколов ====="
-read -rp "Порт для VLESS-TCP-Reality [Enter = $TCP_PORT]: " tcp_port_input
-[[ -n "$tcp_port_input" ]] && TCP_PORT="$tcp_port_input"
-validate_port "VLESS-TCP-Reality" "$TCP_PORT"
-
-read -rp "Порт для VLESS-XHTTP-Reality [Enter = $XHTTP_PORT]: " xhttp_port_input
-[[ -n "$xhttp_port_input" ]] && XHTTP_PORT="$xhttp_port_input"
-validate_port "VLESS-XHTTP-Reality" "$XHTTP_PORT"
-
-[[ "$TCP_PORT" != "$XHTTP_PORT" ]] || die "Порт VLESS-TCP-Reality и VLESS-XHTTP-Reality не должны совпадать ($TCP_PORT)."
-
-echo ""
-read -rp "Порт для Hysteria2 (UDP) [Enter = $HY2_PORT]: " hy2_port_input
-[[ -n "$hy2_port_input" ]] && HY2_PORT="$hy2_port_input"
-validate_port "Hysteria2" "$HY2_PORT"
-echo "UDP-порт может совпадать с TCP-портом: это разные протоколы."
-
-echo ""
-echo "===== Маскировка Reality ====="
-if [[ -z "$MASK_DOMAIN" ]]; then
-    read -rp "Свой домен маскировки (A-запись на этот сервер), например vpn.example.com: " MASK_DOMAIN
-fi
-MASK_DOMAIN="${MASK_DOMAIN#.}"
-[[ -n "$MASK_DOMAIN" && "$MASK_DOMAIN" != *" "* ]] || die "Укажите домен маскировки."
-[[ "$MASK_DOMAIN" =~ ^[A-Za-z0-9.-]+$ && "$MASK_DOMAIN" == *.* ]] || die "Некорректный домен маскировки: $MASK_DOMAIN"
-for banned in github.com www.github.com google.com www.google.com cloudflare.com microsoft.com apple.com amazon.com; do
-    [[ "${MASK_DOMAIN,,}" == "$banned" ]] && die "Домен $banned запрещён как SNI: хостинг блокирует такой сертификат на порту 443."
-done
-[[ "$MASK_MODE" == "self" || "$MASK_MODE" == "external" ]] || die "MASK_MODE должен быть self или external."
-echo "Установка Xray: VLESS TCP-Reality (порт $TCP_PORT) + VLESS XHTTP-Reality (порт $XHTTP_PORT) + Hysteria2 (UDP $HY2_PORT)"
-echo "Домен маскировки: $MASK_DOMAIN (режим: $MASK_MODE)"
+# Сохраняем значения предыдущей установки ДО очистки — они подставятся как
+# значения по умолчанию в вопросах, чтобы повторный запуск не требовал ввода
+# и не обрывался на пустом ответе.
+OLD_MASK_DOMAIN=$(awk -F': ' '/^mask_domain/ {print $2}' "$SETTINGS" 2>/dev/null || true)
+OLD_SUBS_DOMAIN=$(cat "$SUBS_DOMAIN_FILE" 2>/dev/null || true)
+OLD_SERVER_IP=$(cat "$SERVER_ADDRESS_FILE" 2>/dev/null || true)
 
 echo ""
 echo "===== Очистка предыдущей установки (если была) ====="
+# ВАЖНО: очистка выполняется ПЕРЕД всеми вопросами. Даже если пользователь
+# прервёт ввод позже, старый VPN уже удалён и порты свободны.
 # Скрипт можно запускать повторно на одном и том же сервере: перед установкой
 # полностью удаляем всё, что могло остаться от предыдущего запуска (служба,
 # конфиги, сгенерированные команды, nginx-сайт подписок), чтобы новый запуск
@@ -128,8 +99,62 @@ rm -rf "$SUBS_WEBROOT"
 
 echo "Предыдущая конфигурация удалена. Устанавливаю всё заново."
 
+validate_port() {
+    local name="$1" val="$2"
+    [[ "$val" =~ ^[0-9]+$ && "$val" -ge 1 && "$val" -le 65535 ]] || die "Некорректный порт для $name: '$val' (допустимо 1-65535)."
+}
+
+echo ""
+echo "===== Порты протоколов ====="
+read -rp "Порт для VLESS-TCP-Reality [Enter = $TCP_PORT]: " tcp_port_input
+[[ -n "$tcp_port_input" ]] && TCP_PORT="$tcp_port_input"
+validate_port "VLESS-TCP-Reality" "$TCP_PORT"
+
+read -rp "Порт для VLESS-XHTTP-Reality [Enter = $XHTTP_PORT]: " xhttp_port_input
+[[ -n "$xhttp_port_input" ]] && XHTTP_PORT="$xhttp_port_input"
+validate_port "VLESS-XHTTP-Reality" "$XHTTP_PORT"
+
+[[ "$TCP_PORT" != "$XHTTP_PORT" ]] || die "Порт VLESS-TCP-Reality и VLESS-XHTTP-Reality не должны совпадать ($TCP_PORT)."
+
+echo ""
+read -rp "Порт для Hysteria2 (UDP) [Enter = $HY2_PORT]: " hy2_port_input
+[[ -n "$hy2_port_input" ]] && HY2_PORT="$hy2_port_input"
+validate_port "Hysteria2" "$HY2_PORT"
+echo "UDP-порт может совпадать с TCP-портом: это разные протоколы."
+
+echo ""
+echo "===== Маскировка Reality ====="
+if [[ -z "$MASK_DOMAIN" && -n "$OLD_MASK_DOMAIN" ]]; then
+    read -rp "Свой домен маскировки [Enter = $OLD_MASK_DOMAIN]: " MASK_DOMAIN
+    [[ -z "$MASK_DOMAIN" ]] && MASK_DOMAIN="$OLD_MASK_DOMAIN"
+elif [[ -z "$MASK_DOMAIN" ]]; then
+    read -rp "Свой домен маскировки (Enter = адрес сервера, без LE-сертификата): " MASK_DOMAIN
+fi
+MASK_DOMAIN="${MASK_DOMAIN#.}"
+if [[ -z "$MASK_DOMAIN" ]]; then
+    MASK_DOMAIN="${OLD_SERVER_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+    [[ -n "$MASK_DOMAIN" ]] || die "Не удалось определить домен маскировки."
+    echo "Домен не указан — использую $MASK_DOMAIN (сертификат будет самоподписанным)."
+fi
+[[ "$MASK_DOMAIN" != *" "* ]] || die "Домен маскировки не должен содержать пробелы."
+[[ "$MASK_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || die "Некорректный домен маскировки: $MASK_DOMAIN"
+DEFAULT_MASK_IP="${OLD_SERVER_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+for banned in github.com www.github.com google.com www.google.com cloudflare.com microsoft.com apple.com amazon.com; do
+    if [[ "${MASK_DOMAIN,,}" == "$banned" ]]; then
+        echo "ВНИМАНИЕ: домен $banned запрещён хостингом — заменяю на $DEFAULT_MASK_IP."
+        MASK_DOMAIN="$DEFAULT_MASK_IP"
+    fi
+done
+[[ "$MASK_MODE" == "self" || "$MASK_MODE" == "external" ]] || die "MASK_MODE должен быть self или external."
+echo "Установка Xray: VLESS TCP-Reality (порт $TCP_PORT) + VLESS XHTTP-Reality (порт $XHTTP_PORT) + Hysteria2 (UDP $HY2_PORT)"
+echo "Домен маскировки: $MASK_DOMAIN (режим: $MASK_MODE)"
+
+
 echo ""
 echo "===== Адрес сервера ====="
+if [[ -z "$SERVER_IP" && -n "$OLD_SERVER_IP" ]]; then
+    SERVER_IP="$OLD_SERVER_IP"
+fi
 if [[ -z "$SERVER_IP" ]]; then
     SERVER_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
 fi
@@ -155,7 +180,12 @@ echo ""
 echo "===== Настройка подписок ====="
 echo "Укажите домен, который будет использоваться для ссылок подписки."
 echo "Пример: sub.example.com"
-read -rp "Домен подписок (можно оставить пустым и настроить позже): " SUBS_DOMAIN
+if [[ -n "$OLD_SUBS_DOMAIN" ]]; then
+    read -rp "Домен подписок [Enter = $OLD_SUBS_DOMAIN]: " SUBS_DOMAIN
+    [[ -z "$SUBS_DOMAIN" ]] && SUBS_DOMAIN="$OLD_SUBS_DOMAIN"
+else
+    read -rp "Домен подписок (можно оставить пустым и настроить позже): " SUBS_DOMAIN
+fi
 SUBS_DOMAIN="${SUBS_DOMAIN#http://}"
 SUBS_DOMAIN="${SUBS_DOMAIN#https://}"
 SUBS_DOMAIN="${SUBS_DOMAIN%%/*}"

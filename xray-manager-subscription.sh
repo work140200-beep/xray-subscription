@@ -180,11 +180,14 @@ apt install -y qrencode curl jq wget openssl python3 iproute2 nginx certbot || d
 
 # ── 1.5 Маскировка под СВОЙ домен (self-steal SNI) ───────────────────────────
 # Хостеры блокируют сторонние SNI (первый пример — github.com) на 443.
-# В режиме self Reality зеркалирует локальный nginx с ВАШИМ сертификатом — на порту
-# 443 виден сертификат вашего домена, а не стороннего.
+# В режиме self Reality зеркалирует локальный nginx с вашим сертификатом.
+# ВАЖНО: неудача выпуска сертификата НЕ прерывает установку — меню и команды
+# создаются в любом случае, а сертификат можно перевыпустить командой fixcert.
 mkdir -p "$SUBS_WEBROOT"
 MASK_CERT="/etc/letsencrypt/live/$MASK_DOMAIN/fullchain.pem"
 MASK_KEY="/etc/letsencrypt/live/$MASK_DOMAIN/privkey.pem"
+CERT_LOG="/var/log/xray-certbot.log"
+CERT_OK=1
 if [[ "$MASK_MODE" == "self" ]]; then
     if [[ ! -f "$MASK_CERT" || ! -f "$MASK_KEY" ]]; then
         if [[ -z "${SUBS_DOMAIN:-}" || "$MASK_DOMAIN" != "$SUBS_DOMAIN" ]]; then
@@ -204,9 +207,31 @@ NGINX_MASK_HTTP_EOF
             systemctl enable nginx >/dev/null 2>&1 || true
             systemctl restart nginx || die "Не удалось запустить nginx для ACME."
         fi
-        certbot certonly --webroot -w "$SUBS_WEBROOT" -d "$MASK_DOMAIN" --non-interactive \
-            --agree-tos --register-unsafely-without-email >/dev/null 2>&1 \
-            || die "Не удалось выпустить сертификат для $MASK_DOMAIN (проверьте A-запись и порт 80)."
+        echo "Пытаюсь получить Let's Encrypt для $MASK_DOMAIN (лог: $CERT_LOG)..."
+        if certbot certonly --webroot -w "$SUBS_WEBROOT" -d "$MASK_DOMAIN" --non-interactive \
+            --agree-tos --register-unsafely-without-email > "$CERT_LOG" 2>&1; then
+            CERT_OK=1
+        else
+            CERT_OK=0
+            echo "ВНИМАНИЕ: Let's Encrypt не выдан — продолжаю установку с самоподписанным сертификатом."
+            echo "Причину можно посмотреть: tail -n 15 $CERT_LOG"
+            tail -n 8 "$CERT_LOG" 2>/dev/null || true
+        fi
+    fi
+    if [[ "$CERT_OK" -eq 0 || ! -f "$MASK_CERT" || ! -f "$MASK_KEY" ]]; then
+        mkdir -p /etc/xray-selfsigned
+        if [[ ! -s /etc/xray-selfsigned/cert.pem || ! -s /etc/xray-selfsigned/key.pem ]]; then
+            openssl ecparam -genkey -name prime256v1 -out /etc/xray-selfsigned/key.pem 2>/dev/null \
+                || openssl genrsa -out /etc/xray-selfsigned/key.pem 2048
+            openssl req -new -x509 -days 365 -key /etc/xray-selfsigned/key.pem \
+                -out /etc/xray-selfsigned/cert.pem -subj "/CN=$MASK_DOMAIN" \
+                || die "Не удалось создать резервный сертификат."
+            chmod 600 /etc/xray-selfsigned/key.pem
+        fi
+        MASK_CERT="/etc/xray-selfsigned/cert.pem"
+        MASK_KEY="/etc/xray-selfsigned/key.pem"
+        CERT_OK=0
+        echo "Резервный сертификат: CN=$MASK_DOMAIN. Клиенты Hysteria2 получат insecure=1."
     fi
     cat > /etc/nginx/sites-available/xray-mask << NGINX_MASK_TLS_EOF
 server {
@@ -227,6 +252,7 @@ NGINX_MASK_TLS_EOF
     REALITY_TARGET="127.0.0.1:$MASK_LOCAL_PORT"
 else
     REALITY_TARGET="$MASK_DOMAIN:443"
+    CERT_OK=0
     echo "ВНИМАНИЕ: режим external показывает сертификат стороннего домена и может быть заблокирован хостингом."
 fi
 MASK_PATH="/$(openssl rand -hex 12)"
@@ -278,6 +304,7 @@ mask_path: $MASK_PATH
 hy2_obfs: $HY2_OBFS
 hy2_obfs_password: $HY2_OBFS_PASSWORD
 hy2_insecure: 0
+cert_ok: $CERT_OK
 xray_version: $XRAY_VERSION
 hy2_version: $HY2_VERSION
 SETTINGS_EOF
@@ -307,16 +334,23 @@ chmod 755 /usr/local/bin/hysteria
 /usr/local/bin/hysteria version >/dev/null 2>&1 || die "Скачанный бинарник Hysteria2 не запускается."
 
 mkdir -p /etc/hysteria
-if [[ "$MASK_MODE" == "self" ]]; then
-    [[ -f "$MASK_CERT" && -f "$MASK_KEY" ]] || die "Нет сертификата Let's Encrypt для Hysteria2 ($MASK_CERT)."
+if [[ "$CERT_OK" -eq 1 && -f "$MASK_CERT" && -f "$MASK_KEY" ]]; then
     cp "$MASK_CERT" /etc/hysteria/cert.pem
     cp "$MASK_KEY" /etc/hysteria/key.pem
     echo "Hysteria2 использует сертификат Let's Encrypt домена $MASK_DOMAIN (insecure=1 не нужен)."
 else
-    openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/key.pem 2>/dev/null || openssl genrsa -out /etc/hysteria/key.pem 2048
-    openssl req -new -x509 -days 3650 -key /etc/hysteria/key.pem -out /etc/hysteria/cert.pem -subj "/CN=$MASK_DOMAIN" \
-        || die "Не удалось сгенерировать самоподписанный сертификат для Hysteria2."
+    if [[ ! -s /etc/xray-selfsigned/cert.pem || ! -s /etc/xray-selfsigned/key.pem ]]; then
+        mkdir -p /etc/xray-selfsigned
+        openssl ecparam -genkey -name prime256v1 -out /etc/xray-selfsigned/key.pem 2>/dev/null \
+            || openssl genrsa -out /etc/xray-selfsigned/key.pem 2048
+        openssl req -new -x509 -days 365 -key /etc/xray-selfsigned/key.pem \
+            -out /etc/xray-selfsigned/cert.pem -subj "/CN=$MASK_DOMAIN" \
+            || die "Не удалось создать сертификат для Hysteria2."
+    fi
+    cp /etc/xray-selfsigned/cert.pem /etc/hysteria/cert.pem
+    cp /etc/xray-selfsigned/key.pem /etc/hysteria/key.pem
     sed -i "s/^hy2_insecure: .*/hy2_insecure: 1/" "$SETTINGS"
+    echo "Hysteria2 использует временный самоподписанный сертификат (insecure=1)."
 fi
 chmod 600 /etc/hysteria/key.pem /etc/hysteria/cert.pem
 
@@ -1321,6 +1355,51 @@ echo "Если подписки уже создавались раньше — �
 SETSUBDOMAIN_EOF
 chmod +x /usr/local/bin/setsubdomain
 
+# ── Восстановление сертификата вручную и по таймеру ──────────────────────────
+cat > /usr/local/bin/fixcert <<'FIXCERT_EOF'
+#!/bin/bash
+# Повторяет выпуск Let's Encrypt для домена маскировки и подключает сертификат
+# к nginx/Hysteria2. Безопасно вызывать повторно и из таймера.
+source /usr/local/etc/xray/lib.sh
+check_deps
+MASK_DOMAIN=$(awk -F': ' '/^mask_domain/ {print $2}' "$SETTINGS")
+LOCAL_PORT=$(awk -F': ' '/^mask_local_port/ {print $2}' "$SETTINGS")
+[[ "$LOCAL_PORT" =~ ^[0-9]+$ ]] || LOCAL_PORT=8444
+CERT_LOG=/var/log/xray-certbot.log
+echo "Запрашиваю сертификат для $MASK_DOMAIN..."
+if certbot certonly --webroot -w /var/www/xray-subscriptions -d "$MASK_DOMAIN" \
+    --non-interactive --agree-tos --register-unsafely-without-email > "$CERT_LOG" 2>&1; then
+    cat > /etc/nginx/sites-available/xray-mask << NGINX_FIXCERT_EOF
+server {
+    listen 127.0.0.1:$LOCAL_PORT ssl;
+    server_name $MASK_DOMAIN;
+    root /var/www/xray-subscriptions;
+    ssl_certificate /etc/letsencrypt/live/$MASK_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$MASK_DOMAIN/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location ^~ /.well-known/acme-challenge/ { try_files \$uri =404; default_type text/plain; }
+    location / { return 200 "ok\n"; }
+}
+NGINX_FIXCERT_EOF
+    nginx -t >/dev/null 2>&1 || { echo "nginx: невалидная конфигурация" >&2; tail -n 15 "$CERT_LOG"; exit 1; }
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx
+    cp /etc/letsencrypt/live/$MASK_DOMAIN/fullchain.pem /etc/hysteria/cert.pem
+    cp /etc/letsencrypt/live/$MASK_DOMAIN/privkey.pem /etc/hysteria/key.pem
+    chmod 600 /etc/hysteria/key.pem /etc/hysteria/cert.pem
+    sed -i "s/^hy2_insecure: .*/hy2_insecure: 0/" "$SETTINGS"
+    sed -i "s/^cert_ok: .*/cert_ok: 1/" "$SETTINGS"
+    sed -i "s/^mask_mode: .*/mask_mode: self/" "$SETTINGS"
+    hy2restart >/dev/null 2>&1 || true
+    subscription refresh-all >/dev/null 2>&1 || true
+    echo "ГОТОВО: сертификат Let's Encrypt подключён, insecure=1 убран."
+else
+    echo "Сертификат снова не получен. Лог $CERT_LOG:"
+    tail -n 15 "$CERT_LOG"
+    exit 1
+fi
+FIXCERT_EOF
+chmod +x /usr/local/bin/fixcert
+
 # ── Автопродление Let's Encrypt ───────────────────────────────────────────────
 mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh <<'DEPLOY_EOF'
@@ -1334,7 +1413,7 @@ Description=Renew Let's Encrypt certificates and reload nginx
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/certbot renew --quiet
+ExecStart=/bin/bash -lc "/usr/bin/certbot renew --quiet; /usr/local/bin/fixcert >/dev/null 2>&1 || true"
 CBRENEW_UNIT_EOF
 cat > /etc/systemd/system/certbot-renew.timer <<'CBRENEW_TIMER_EOF'
 [Unit]
@@ -1771,6 +1850,7 @@ cat << HELP_EOF > "$HOME/help"
     setsubdomain - настроить/сменить домен для ссылок подписки (можно и после установки)
     xray-check   - диагностика службы, портов, ключей и клиентских ссылок
     xray-menu    - интерактивное меню со всеми пунктами выше
+    fixcert      - повторить выпуск сертификата и убрать insecure=1
 
 Конфигурация:      $CONFIG
 Ключи:              $KEYS

@@ -96,7 +96,7 @@ sudo bash /tmp/xray-manager-subscription.sh
 - **Маскировка под свой домен (`MASK_MODE=self`, по умолчанию).** Reality зеркалирует локальный nginx на `127.0.0.1:8444` с сертификатом Let's Encrypt вашего домена. На порту 443 виден ваш сертификат, а не `github.com`. `MASK_DOMAIN` теперь обязателен; популярные сторонние домены отклоняются. Режим `MASK_MODE=external` доступен, но он снова показывает чужой сертификат и может привести к блокировке порта хостингом.
 - **Hysteria2:** сертификат Let's Encrypt вместо самоподписанного, `insecure=1` убран из ссылок, UDP-порт по умолчанию 443. Опциональный `obfs=salamander`: `HY2_OBFS=yes` (все клиенты обязаны указать `obfs-password` из `.settings`).
 - **XHTTP:** случайный путь и непустой `Host` вместо `path=/`, `host=`; три shortId с возможностью ротации через `setmask` (старые остаются рабочими).
-- **Сертификаты:** systemd-таймер `certbot-renew.timer` + deploy-хук перезагрузки nginx. Проблема «всё работало пару дней, потом упало» с истёкшим сертификатом устранена.
+- **Сертификаты:** systemd-таймер `certbot-renew.timer` + deploy-хук перезагрузки nginx. Проблема «всё работало пару дней, потом упало» с истёкшим сертификатом устранена. Если выпуск сертификата не удался при установке, скрипт **не прерывается**: ставится временный самоподписанный сертификат, создаются все команды и меню, а команда `fixcert` повторяет выпуск и убирает `insecure=1`. Лог ошибок ACME: `/var/log/xray-certbot.log`.
 - **Безопасность:** `config.json` — `root:xray 640` (ключ не читается другими пользователями), `.keys`/`.settings` — 600, токены подписок не пишутся в access-лог nginx, перед переустановкой создаётся бэкап в `/root/xray-manager-backups/<timestamp>`.
 - **Supply chain:** версии зафиксированы (`XRAY_VERSION`, `HY2_VERSION`), бинарник Hysteria2 проверяется по `hashes.txt` релиза.
 - Удалено блокирующее правило `geoip:cn` из маршрутизации по умолчанию.
@@ -118,7 +118,7 @@ sudo bash /tmp/xray-manager-subscription.sh
                  setcascade,unsetcascade,setmask,routingmode,
                  disable_routing,renewgeo,subscription,
                  setsubdomain,xray-check,xray-menu,
-                 hy2sync,hy2restart}
+                 hy2sync,hy2restart,fixcert}
 ```
 
 ## Лицензия

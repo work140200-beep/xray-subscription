@@ -31,7 +31,7 @@ HY2_OBFS="${HY2_OBFS:-no}"           # yes = salamander; ВСЕ клиенты �
 DEFAULT_FP="${DEFAULT_FP:-chrome}"
 SUBS_PORT="${SUBS_PORT:-9443}"
 BACKUP_ROOT="/root/xray-manager-backups"
-INSTALLER_BUILD="2026-11-28-cleanup-first"
+INSTALLER_BUILD="2026-11-28-acme-and-hash-fix"
 # Адрес, который будет использоваться в клиентских VLESS-ссылках.
 # Если SERVER_IP задан извне, он имеет приоритет; иначе адрес определяется локально.
 SERVER_IP="${SERVER_IP:-}"
@@ -222,23 +222,23 @@ CERT_LOG="/var/log/xray-certbot.log"
 CERT_OK=1
 if [[ "$MASK_MODE" == "self" ]]; then
     if [[ ! -f "$MASK_CERT" || ! -f "$MASK_KEY" ]]; then
-        if [[ -z "${SUBS_DOMAIN:-}" || "$MASK_DOMAIN" != "$SUBS_DOMAIN" ]]; then
-            cat > /etc/nginx/sites-available/xray-mask << NGINX_MASK_HTTP_EOF
+        # ACME-сайт нужен ВСЕГДА, даже когда домен маскировки совпадает с доменом
+        # подписок: сайт подписок создаётся позже, а certbot обращается сейчас.
+        cat > /etc/nginx/sites-available/xray-acme << NGINX_ACME_EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name $MASK_DOMAIN;
+    server_name $MASK_DOMAIN ${SUBS_DOMAIN:-$MASK_DOMAIN};
     root $SUBS_WEBROOT;
     location ^~ /.well-known/acme-challenge/ { try_files \$uri =404; default_type text/plain; }
     location / { return 404; }
 }
-NGINX_MASK_HTTP_EOF
-            ln -sf /etc/nginx/sites-available/xray-mask /etc/nginx/sites-enabled/xray-mask
-            rm -f /etc/nginx/sites-enabled/default
-            nginx -t >/dev/null 2>&1 || die "HTTP-конфигурация nginx для маскировки невалидна."
-            systemctl enable nginx >/dev/null 2>&1 || true
-            systemctl restart nginx || die "Не удалось запустить nginx для ACME."
-        fi
+NGINX_ACME_EOF
+        ln -sf /etc/nginx/sites-available/xray-acme /etc/nginx/sites-enabled/xray-acme
+        rm -f /etc/nginx/sites-enabled/default
+        nginx -t >/dev/null 2>&1 || die "HTTP-конфигурация nginx для ACME невалидна."
+        systemctl enable nginx >/dev/null 2>&1 || true
+        systemctl restart nginx || die "Не удалось запустить nginx для ACME."
         echo "Пытаюсь получить Let's Encrypt для $MASK_DOMAIN (лог: $CERT_LOG)..."
         if certbot certonly --webroot -w "$SUBS_WEBROOT" -d "$MASK_DOMAIN" --non-interactive \
             --agree-tos --register-unsafely-without-email > "$CERT_LOG" 2>&1; then
@@ -359,8 +359,11 @@ curl -4 -fsSL -o /usr/local/bin/hysteria "${hy2_base}/hysteria-linux-${hy2_arch}
     || die "Не удалось скачать Hysteria2 ${HY2_VERSION} (hysteria-linux-${hy2_arch})."
 curl -4 -fsSL -o "$hy2_hash_file" "${hy2_base}/hashes.txt" \
     || die "Не удалось скачать hashes.txt для Hysteria2 ${HY2_VERSION}."
-( cd /usr/local/bin && grep -E "hysteria-linux-${hy2_arch}$" "$hy2_hash_file" | sha256sum -c - ) \
-    || die "Контрольная сумма Hysteria2 не совпала — установка прервана."
+hy2_expected=$(awk -v n="hysteria-linux-${hy2_arch}" '$2 ~ ("/" n "$") || $2 == n {print $1; exit}' "$hy2_hash_file")
+hy2_actual=$(sha256sum /usr/local/bin/hysteria | awk '{print $1}')
+[[ -n "$hy2_expected" && "$hy2_expected" == "$hy2_actual" ]] \
+    || die "Контрольная сумма Hysteria2 не совпала (expected=$hy2_expected actual=$hy2_actual) — установка прервана."
+echo "Hysteria2 ${HY2_VERSION}: SHA256 совпадает."
 rm -f "$hy2_hash_file"
 chmod 755 /usr/local/bin/hysteria
 /usr/local/bin/hysteria version >/dev/null 2>&1 || die "Скачанный бинарник Hysteria2 не запускается."
@@ -1398,6 +1401,18 @@ MASK_DOMAIN=$(awk -F': ' '/^mask_domain/ {print $2}' "$SETTINGS")
 LOCAL_PORT=$(awk -F': ' '/^mask_local_port/ {print $2}' "$SETTINGS")
 [[ "$LOCAL_PORT" =~ ^[0-9]+$ ]] || LOCAL_PORT=8444
 CERT_LOG=/var/log/xray-certbot.log
+cat > /etc/nginx/sites-available/xray-acme << NGINX_ACME_FIX_EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $MASK_DOMAIN;
+    root /var/www/xray-subscriptions;
+    location ^~ /.well-known/acme-challenge/ { try_files \$uri =404; default_type text/plain; }
+    location / { return 404; }
+}
+NGINX_ACME_FIX_EOF
+ln -sf /etc/nginx/sites-available/xray-acme /etc/nginx/sites-enabled/xray-acme
+nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
 echo "Запрашиваю сертификат для $MASK_DOMAIN..."
 if certbot certonly --webroot -w /var/www/xray-subscriptions -d "$MASK_DOMAIN" \
     --non-interactive --agree-tos --register-unsafely-without-email > "$CERT_LOG" 2>&1; then

@@ -69,9 +69,11 @@
 Одна команда на сервере Ubuntu/Debian (под root или через `sudo`):
 
 ```bash
-curl -sL https://raw.githubusercontent.com/work140200-beep/xray-subscription/main/xray-manager-subscription.sh -o /tmp/xray-manager-subscription.sh
+curl -sL "https://raw.githubusercontent.com/work140200-beep/xray-subscription/main/xray-manager-subscription.sh?v=$(date +%s)" -o /tmp/xray-manager-subscription.sh
 sudo bash /tmp/xray-manager-subscription.sh
 ```
+
+> `?v=$(date +%s)` важен: `raw.githubusercontent.com` кэширует файл до 5 минут (`Cache-Control: max-age=300`), без уникального параметра можно скачать предыдущую версию. В начале работы скрипт печатает `BUILD=...` — сверьте его с текущим коммитом.
 
 При установке скрипт интерактивно спросит:
 1. **Порт для VLESS-TCP-Reality** (Enter = 443)

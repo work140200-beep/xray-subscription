@@ -31,6 +31,7 @@ HY2_OBFS="${HY2_OBFS:-no}"           # yes = salamander; ВСЕ клиенты �
 DEFAULT_FP="${DEFAULT_FP:-chrome}"
 SUBS_PORT="${SUBS_PORT:-9443}"
 BACKUP_ROOT="/root/xray-manager-backups"
+INSTALLER_BUILD="2026-11-28-cleanup-first"
 # Адрес, который будет использоваться в клиентских VLESS-ссылках.
 # Если SERVER_IP задан извне, он имеет приоритет; иначе адрес определяется локально.
 SERVER_IP="${SERVER_IP:-}"
@@ -104,6 +105,7 @@ validate_port() {
     [[ "$val" =~ ^[0-9]+$ && "$val" -ge 1 && "$val" -le 65535 ]] || die "Некорректный порт для $name: '$val' (допустимо 1-65535)."
 }
 
+echo "BUILD=$INSTALLER_BUILD"
 echo ""
 echo "===== Порты протоколов ====="
 read -rp "Порт для VLESS-TCP-Reality [Enter = $TCP_PORT]: " tcp_port_input
